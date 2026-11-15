@@ -161,6 +161,54 @@ class HOTPExampleValuesFromTheRFC(unittest.TestCase):
         self.assertEqual(hotp.at(4), "654019")
 
 
+class HOTPMonotonicCounterTest(unittest.TestCase):
+    def setUp(self):
+        self.hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+
+    def test_verify_and_advance_returns_next_counter(self):
+        next_counter = self.hotp.verify_and_advance(self.hotp.at(0), 0)
+        self.assertEqual(next_counter, 1)
+        next_counter = self.hotp.verify_and_advance(self.hotp.at(1), next_counter)
+        self.assertEqual(next_counter, 2)
+
+    def test_replayed_code_is_rejected_after_advance(self):
+        code = self.hotp.at(3)
+        next_counter = self.hotp.verify_and_advance(code, 3)
+        self.assertEqual(next_counter, 4)
+        # The same code against the advanced counter must fail.
+        self.assertFalse(self.hotp.verify(code, next_counter))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.hotp.verify_and_advance(code, next_counter)
+
+    def test_look_ahead_window_is_bounded(self):
+        self.assertFalse(self.hotp.verify(self.hotp.at(2), 0, look_ahead_window=1))
+        self.assertTrue(self.hotp.verify(self.hotp.at(2), 0, look_ahead_window=2))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.hotp.verify_and_advance(self.hotp.at(2), 0, look_ahead_window=1)
+
+    def test_verify_and_advance_skips_consumed_counters(self):
+        next_counter = self.hotp.verify_and_advance(self.hotp.at(2), 0, look_ahead_window=2)
+        self.assertEqual(next_counter, 3)
+        # Counters 0, 1 and 2 are now behind the persisted counter and cannot be replayed.
+        for counter in range(3):
+            with self.subTest(counter=counter):
+                self.assertFalse(self.hotp.verify(self.hotp.at(counter), next_counter))
+
+    def test_mismatch_leaves_counter_untouched(self):
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.hotp.verify_and_advance("000000", 0, look_ahead_window=1)
+        # The original counter still authenticates after the failed attempt.
+        self.assertEqual(self.hotp.verify_and_advance(self.hotp.at(0), 0), 1)
+
+    def test_invalid_arguments(self):
+        with self.assertRaisesRegex(ValueError, "counter cannot be negative"):
+            self.hotp.verify_and_advance(self.hotp.at(0), -1)
+        with self.assertRaisesRegex(ValueError, "look_ahead_window cannot be negative"):
+            self.hotp.verify(self.hotp.at(0), 0, look_ahead_window=-1)
+        with self.assertRaisesRegex(ValueError, "look_ahead_window cannot be negative"):
+            self.hotp.verify_and_advance(self.hotp.at(0), 0, look_ahead_window=-1)
+
+
 class TOTPExampleValuesFromTheRFC(unittest.TestCase):
     RFC_VALUES: ClassVar[dict] = {
         (hashlib.sha1, b"12345678901234567890"): (
@@ -685,6 +733,68 @@ class GetTimeCodeTest(unittest.TestCase):
             totp.verify_and_get_timecode("764328", for_time=200, valid_window=-1)
 
 
+class TOTPMonotonicTimecodeTest(unittest.TestCase):
+    def setUp(self):
+        self.totp = pyotp.TOTP("ABCDEFGHABCDEFGH")
+
+    def test_verify_rejects_replayed_timecode(self):
+        code = self.totp.generate_otp(6)
+        self.assertTrue(self.totp.verify(code, for_time=200, last_timecode=None))
+        matched = self.totp.verify_and_get_timecode(code, for_time=200)
+        self.assertEqual(matched, 6)
+        # The same code at the same timecode must not authenticate again.
+        self.assertFalse(self.totp.verify(code, for_time=200, last_timecode=matched))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.totp.verify_and_get_timecode(code, for_time=200, last_timecode=matched)
+
+    def test_verify_rejects_backwards_timecode_with_valid_window(self):
+        previous = self.totp.verify_and_get_timecode(
+            self.totp.generate_otp(7), for_time=210, valid_window=1
+        )
+        self.assertEqual(previous, 7)
+        # An older-but-still-in-window code must be rejected once its timecode was consumed.
+        stale_code = self.totp.generate_otp(6)
+        self.assertFalse(self.totp.verify(stale_code, for_time=210, valid_window=1, last_timecode=previous))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.totp.verify_and_get_timecode(
+                stale_code, for_time=210, valid_window=1, last_timecode=previous
+            )
+
+    def test_verify_accepts_strictly_advancing_timecode(self):
+        last_timecode = self.totp.verify_and_get_timecode(
+            self.totp.generate_otp(6), for_time=200
+        )
+        next_code = self.totp.generate_otp(7)
+        self.assertTrue(
+            self.totp.verify(next_code, for_time=210, valid_window=1, last_timecode=last_timecode)
+        )
+        advanced = self.totp.verify_and_get_timecode(
+            next_code, for_time=210, valid_window=1, last_timecode=last_timecode
+        )
+        self.assertEqual(advanced, 7)
+
+    def test_failed_match_does_not_move_timecode(self):
+        last_timecode = 5
+        self.assertFalse(
+            self.totp.verify("000000", for_time=200, valid_window=1, last_timecode=last_timecode)
+        )
+        with self.assertRaises(pyotp.OTPVerificationError):
+            self.totp.verify_and_get_timecode(
+                "000000", for_time=200, valid_window=1, last_timecode=last_timecode
+            )
+        # A valid code for the next timecode is still accepted after the failed attempt.
+        matched = self.totp.verify_and_get_timecode(
+            self.totp.generate_otp(6), for_time=200, last_timecode=last_timecode
+        )
+        self.assertEqual(matched, 6)
+
+    def test_invalid_last_timecode(self):
+        for method in (self.totp.verify, self.totp.verify_and_get_timecode):
+            with self.subTest(method=method.__name__):
+                with self.assertRaisesRegex(ValueError, "last_timecode cannot be negative"):
+                    method("764328", for_time=200, last_timecode=-1)
+
+
 class DigestFunctionTest(unittest.TestCase):
     def test_md5(self):
         with self.assertRaises(ValueError) as cm:
@@ -730,8 +840,29 @@ class ParseUriTest(unittest.TestCase):
             )
 
     def test_duplicate_unknown_parameters(self):
-        otp = pyotp.parse_uri("otpauth://totp/?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&unknown=one&unknown=two")
-        self.assertEqual(otp.at(0), "755224")
+        with self.assertRaisesRegex(ValueError, "Unsupported otpauth URI parameter: unknown"):
+            pyotp.parse_uri("otpauth://totp/?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&unknown=one&unknown=two")
+
+    def test_unknown_parameters_are_rejected(self):
+        seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        for kind in ("totp", "hotp"):
+            with self.subTest(kind=kind):
+                with self.assertRaisesRegex(ValueError, "Unsupported otpauth URI parameter: unknown"):
+                    pyotp.parse_uri(f"otpauth://{kind}/?secret={seed}&unknown=value")
+
+    def test_duplicate_image_parameter(self):
+        with self.assertRaisesRegex(ValueError, "Duplicate image parameter"):
+            pyotp.parse_uri(
+                "otpauth://totp/?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+                "&image=https%3A%2F%2Ftest.net%2Fa.png&image=https%3A%2F%2Ftest.net%2Fb.png"
+            )
+
+    def test_type_specific_parameters(self):
+        seed = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        with self.assertRaisesRegex(ValueError, "counter parameter is only valid for hotp URIs"):
+            pyotp.parse_uri(f"otpauth://totp/?secret={seed}&counter=5")
+        with self.assertRaisesRegex(ValueError, "period parameter is only valid for totp URIs"):
+            pyotp.parse_uri(f"otpauth://hotp/?secret={seed}&period=60")
 
     def test_invalid_period(self):
         for encoder in ("", "steam"):

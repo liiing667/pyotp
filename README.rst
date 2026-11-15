@@ -72,11 +72,15 @@ Time-based OTPs
 Preventing replay attacks
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``TOTP.verify()`` and ``TOTP.verify_and_get_timecode()`` are stateless: they can accept the same OTP repeatedly while
-it remains valid. To prevent reuse, call ``verify_and_get_timecode()`` and persist its returned timecode for each
-credential in a database shared by all application workers. The timecode identifies the matching TOTP interval;
-it is not the wall-clock timestamp when verification occurred. Reject a timecode that is less than or equal to the
-last accepted timecode.
+Both TOTP and HOTP are single-use credentials: an accepted OTP must never authenticate again. PyOTP supports this
+with persistable, strictly monotonic counters. Store one integer per credential in a database shared by all
+application workers (for TOTP, the last accepted timecode; for HOTP, the next counter) and pass it back into the
+verification call. A reused or backwards-moving counter is rejected directly by the library.
+
+For TOTP, pass the persisted timecode as ``last_timecode``. ``verify()`` returns ``False`` and
+``verify_and_get_timecode()`` raises ``pyotp.OTPVerificationError`` when the matching timecode is not strictly
+greater than the persisted one. On success, persist the returned matching timecode (it identifies the TOTP interval,
+not the wall-clock verification time, and may differ from the current timecode when ``valid_window`` is enabled).
 
 ``verify_and_get_timecode()`` raises ``pyotp.OTPVerificationError`` (a subclass of ``pyotp.PyOTPError``) if the OTP
 does not match within the allowed window. Successful verification always returns an integer timecode.
@@ -91,21 +95,25 @@ row per credential, an ``id`` primary key, and a nullable integer ``last_timecod
     import pyotp
 
     def verify_totp_once(db, credential_id, totp, otp):
+        last_timecode = db.execute(
+            "SELECT last_timecode FROM totp_credentials WHERE id = ?", (credential_id,)
+        ).fetchone()[0]
         try:
-            matched_timecode = totp.verify_and_get_timecode(otp)
+            matched_timecode = totp.verify_and_get_timecode(otp, last_timecode=last_timecode)
         except pyotp.OTPVerificationError:
             return False
 
         with db:
             updated = db.execute(
-                "UPDATE totp_credentials SET last_timecode = ? "
-                "WHERE id = ? AND (last_timecode IS NULL OR last_timecode < ?)",
-                (matched_timecode, credential_id, matched_timecode),
+                "UPDATE totp_credentials SET last_timecode = ? WHERE id = ?",
+                (matched_timecode, credential_id),
             )
         return updated.rowcount == 1
 
 Grant authentication only when this function returns ``True``, after the database transaction has committed.
-If you enable ``valid_window``, persist the returned matching timecode, which may differ from the server's current timecode.
+The read-modify-write must run inside one transaction (for example with ``SELECT ... FOR UPDATE``) so two concurrent
+requests cannot both accept the same timecode. If you enable ``valid_window``, the returned matching timecode may
+differ from the server's current timecode; persist it unchanged.
 
 .. warning::
 
@@ -128,6 +136,16 @@ Counter-based OTPs
     # OTP verified with a counter
     hotp.verify('316439', 1401) # => True
     hotp.verify('316439', 1402) # => False
+
+    # Replay-safe verification: verify_and_advance() accepts the OTP only within the bounded
+    # look-ahead window and returns the next counter to persist. Reusing a counter that is not
+    # strictly greater than the one already accepted can never pass again.
+    counter = 0  # load the persisted counter for this credential
+    counter = hotp.verify_and_advance(hotp.at(counter), counter, look_ahead_window=5)
+    # => 1; persist this value and use it on the next request
+
+    # The same code against the advanced counter is rejected.
+    hotp.verify_and_advance(hotp.at(0), counter)  # raises pyotp.OTPVerificationError
 
 Generating a Secret Key
 ~~~~~~~~~~~~~~~~~~~~~~~

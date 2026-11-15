@@ -78,7 +78,12 @@ class TOTP(OTP):
         return self.generate_otp(self.timecode(time.time()))
 
     def verify(
-        self, otp: str, *, for_time: int | float | datetime.datetime | None = None, valid_window: int = 0
+        self,
+        otp: str,
+        *,
+        for_time: int | float | datetime.datetime | None = None,
+        valid_window: int = 0,
+        last_timecode: int | None = None,
     ) -> bool:
         """
         Verifies the OTP passed in against the current time OTP.
@@ -90,24 +95,34 @@ class TOTP(OTP):
         :param otp: the OTP to check against
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this many counter ticks before and after the current one
+        :param last_timecode: timecode of the last accepted OTP for this credential, as persisted by
+            the caller. When provided, an OTP whose matching timecode is not strictly greater than
+            this value is rejected, which prevents reuse of an already-consumed timecode. Pass
+            ``None`` for a credential that has never authenticated.
         :returns: True if verification succeeded, False otherwise
-        :raises ValueError: if for_time is before the Unix epoch or after year 9999 in UTC
+        :raises ValueError: if for_time is before the Unix epoch or after year 9999 in UTC, if
+            valid_window is negative, or if last_timecode is negative
         """
         if for_time is None:
             for_time = time.time()
 
-        timecode = self.timecode(for_time)
+        if last_timecode is not None and last_timecode < 0:
+            raise ValueError("last_timecode cannot be negative")
 
-        if valid_window:
-            for i in range(-valid_window, valid_window + 1):
-                if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                    return True
+        try:
+            matched_timecode = self._match_timecode(otp, for_time, valid_window)
+        except OTPVerificationError:
             return False
 
-        return utils.strings_equal(str(otp), str(self.generate_otp(timecode)))
+        return last_timecode is None or matched_timecode > last_timecode
 
     def verify_and_get_timecode(
-        self, otp: str, *, for_time: int | float | datetime.datetime | None = None, valid_window: int = 0
+        self,
+        otp: str,
+        *,
+        for_time: int | float | datetime.datetime | None = None,
+        valid_window: int = 0,
+        last_timecode: int | None = None,
     ) -> int:
         """
         Verifies the OTP passed in against the current time OTP and returns the matching timecode.
@@ -130,20 +145,47 @@ class TOTP(OTP):
         :param otp: the OTP to check against
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this counter ticks before and after the current one
+        :param last_timecode: timecode of the last accepted OTP for this credential, as persisted by
+            the caller. When provided, an OTP whose matching timecode is not strictly greater than
+            this value is rejected, which prevents reuse of an already-consumed timecode. Pass
+            ``None`` for a credential that has never authenticated.
         :returns: matching timecode if verification succeeded
         :raises pyotp.exceptions.OTPVerificationError: if the OTP does not match within the valid window
-        :raises ValueError: if valid_window is negative or for_time is before the Unix epoch or after year 9999 in UTC
+        :raises ValueError: if valid_window or last_timecode is negative, or for_time is before the
+            Unix epoch or after year 9999 in UTC
         """
         if for_time is None:
             for_time = time.time()
 
+        if last_timecode is not None and last_timecode < 0:
+            raise ValueError("last_timecode cannot be negative")
+
+        matched_timecode = self._match_timecode(otp, for_time, valid_window)
+
+        if last_timecode is not None and matched_timecode <= last_timecode:
+            raise OTPVerificationError("OTP timecode has already been used")
+
+        return matched_timecode
+
+    def _match_timecode(
+        self, otp: str, for_time: int | float | datetime.datetime, valid_window: int
+    ) -> int:
+        """
+        Finds the timecode whose OTP matches the supplied value within the permitted window.
+
+        :raises ValueError: if valid_window is negative
+        :raises pyotp.exceptions.OTPVerificationError: if no OTP in the window matches
+        """
         if valid_window < 0:
             raise ValueError("valid_window cannot be negative")
 
-        timecode = self.timecode(for_time)
-        for i in range(-valid_window, valid_window + 1):
-            if utils.strings_equal(str(otp), str(self.generate_otp(timecode + i))):
-                return timecode + i
+        current_timecode = self.timecode(for_time)
+        for offset in range(-valid_window, valid_window + 1):
+            candidate_timecode = current_timecode + offset
+            if candidate_timecode < 0:
+                continue
+            if utils.strings_equal(str(otp), str(self.generate_otp(candidate_timecode))):
+                return candidate_timecode
         raise OTPVerificationError("OTP verification failed")
 
     def provisioning_uri(self, *, name: str | None = None, issuer_name: str | None = None, **kwargs: Any) -> str:

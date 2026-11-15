@@ -75,14 +75,17 @@ def parse_uri(uri: str) -> OTP:
         otp_data["issuer"] = unquote(accountinfo_parts[0])
         otp_data["name"] = unquote(accountinfo_parts[1])
 
-    # Parse values
-    security_parameters = {"secret", "issuer", "algorithm", "encoder", "digits", "period", "counter"}
+    # Parse values. Only parameters defined by the otpauth key URI format (and the
+    # documented Steam extension) are accepted; unknown query parameters are rejected
+    # instead of being silently ignored so that misconfigured URIs fail loudly.
+    known_parameters = {"secret", "issuer", "algorithm", "encoder", "digits", "period", "counter", "image"}
     seen_parameters: set[str] = set()
     for key, value in parse_qsl(parsed_uri.query, keep_blank_values=True):
-        if key in security_parameters:
-            if key in seen_parameters:
-                raise ValueError(f"Duplicate {key} parameter")
-            seen_parameters.add(key)
+        if key not in known_parameters:
+            raise ValueError(f"Unsupported otpauth URI parameter: {key}")
+        if key in seen_parameters:
+            raise ValueError(f"Duplicate {key} parameter")
+        seen_parameters.add(key)
         if not value:
             continue
         if key == "secret":
@@ -120,8 +123,12 @@ def parse_uri(uri: str) -> OTP:
     if encoder == "steam":
         return contrib.Steam(secret, **otp_data)
     if parsed_uri.netloc == "totp":
+        if "initial_count" in otp_data:
+            raise ValueError("counter parameter is only valid for hotp URIs")
         return TOTP(secret, **otp_data)
     elif parsed_uri.netloc == "hotp":
+        if "interval" in otp_data:
+            raise ValueError("period parameter is only valid for totp URIs")
         return HOTP(secret, **otp_data)
 
     raise ValueError("Not a supported OTP type")

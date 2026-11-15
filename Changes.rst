@@ -1,3 +1,19 @@
+Unreleased
+==========
+
+- Enforce persistable monotonic replay protection in TOTP verification:
+  ``verify()`` and ``verify_and_get_timecode()`` accept a ``last_timecode``
+  argument and reject reused or backwards-moving timecodes, including when
+  ``valid_window`` is enabled.
+
+- Add bounded look-ahead (``look_ahead_window``) and
+  ``HOTP.verify_and_advance()``, which returns the next counter to persist
+  so HOTP OTPs cannot be replayed or verified out of order.
+
+- Tighten ``parse_uri``: reject unknown otpauth parameters, reject any
+  duplicated parameter, and reject ``counter``/``period`` on the wrong OTP
+  type instead of silently accepting them.
+
 Changes for v2.11.2 (2026-11-14)
 ================================
 
