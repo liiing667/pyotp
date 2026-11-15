@@ -110,9 +110,10 @@ If you enable ``valid_window``, persist the returned matching timecode, which ma
 .. warning::
 
     For both HOTP and TOTP, do not use the raw submitted OTP, or a hash of that raw value, as the replay-detection key.
-    PyOTP applies Unicode NFKC normalization when comparing OTPs: for example, ``123456`` and ``１２３４５６`` are treated
-    as the same code, but their raw strings and hashes differ. An attacker could submit another spelling of an
-    already-used code to bypass such a check. Track the accepted counter instead.
+    A code stays valid for its whole validity window (plus any ``valid_window`` ticks), so it can be replayed
+    until it expires. Track the accepted counter instead. Note that PyOTP compares OTPs literally, without
+    Unicode normalization: only an exact match verifies, so full-width digits and other compatibility
+    characters are rejected.
 
 Counter-based OTPs
 ~~~~~~~~~~~~~~~~~~

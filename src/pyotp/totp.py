@@ -91,10 +91,13 @@ class TOTP(OTP):
         :param for_time: Unix timestamp (int or float) or datetime to check OTP at (defaults to now)
         :param valid_window: extends the validity to this many counter ticks before and after the current one
         :returns: True if verification succeeded, False otherwise
-        :raises ValueError: if for_time is before the Unix epoch or after year 9999 in UTC
+        :raises ValueError: if valid_window is negative or for_time is before the Unix epoch or after year 9999 in UTC
         """
         if for_time is None:
             for_time = time.time()
+
+        if valid_window < 0:
+            raise ValueError("valid_window cannot be negative")
 
         timecode = self.timecode(for_time)
 

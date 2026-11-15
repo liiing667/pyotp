@@ -1,3 +1,14 @@
+Changes for v2.11.3 (unreleased)
+================================
+
+-  Normalize base32 secrets by stripping spaces and hyphens, and raise
+   ``ValueError`` for secrets that are not valid base32
+
+-  Compare OTPs literally without Unicode NFKC normalization, so
+   full-width digits and other compatibility characters no longer verify
+
+-  Reject negative ``valid_window`` in ``TOTP.verify``
+
 Changes for v2.11.2 (2026-11-14)
 ================================
 

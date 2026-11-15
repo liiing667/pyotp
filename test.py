@@ -81,7 +81,7 @@ class HOTPExampleValuesFromTheRFC(unittest.TestCase):
     def test_verify_otp_reuse(self):
         hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
         self.assertTrue(hotp.verify("520489", 9))
-        self.assertTrue(hotp.verify("５２０４８９", 9))
+        self.assertFalse(hotp.verify("５２０４８９", 9))
         self.assertFalse(hotp.verify("520489", 10))
         self.assertFalse(hotp.verify("５２０４８９", 10))
 
@@ -577,42 +577,39 @@ class CompareDigestTest(unittest.TestCase):
 class StringComparisonTest(CompareDigestTest):
     method = staticmethod(pyotp.utils.strings_equal)
 
-    def test_fullwidth_input(self):
-        self.assertTrue(self.method("ｘs１２３45", "xs12345"))
+    def test_fullwidth_input_is_not_normalized(self):
+        self.assertFalse(self.method("ｘs１２３45", "xs12345"))
 
     def test_unicode_equal(self):
         self.assertTrue(self.method("ěšč45", "ěšč45"))
 
     def test_input_length_limit(self):
-        self.assertTrue(self.method("ａ" * 1024, "a" * 1024))
+        self.assertTrue(self.method("a" * 1024, "a" * 1024))
         self.assertFalse(self.method("a" * 1024, "b" * 1024))
+        self.assertFalse(self.method("a" * 1025, "a" * 1025))
 
-    def test_oversized_input_is_not_normalized(self):
+    def test_oversized_input_rejected(self):
         inputs = ("a" * 1025, "\u0301\u0323" * 512 + "\u0301", "\u0301\u0323" * 32768)
         for value in inputs:
             for s1, s2 in ((value, "a"), ("a", value), (value, value)):
                 with self.subTest(lengths=(len(s1), len(s2))):
-                    with patch("pyotp.utils.unicodedata.normalize") as normalize:
-                        self.assertFalse(self.method(s1, s2))
-                        normalize.assert_not_called()
+                    self.assertFalse(self.method(s1, s2))
 
 
 class OTPInputSizeTest(unittest.TestCase):
-    def test_oversized_otp_is_not_normalized(self):
+    def test_oversized_otp_rejected(self):
         oversized = "\u0301\u0323" * 32768
         hotp = pyotp.HOTP("ABCDEFGHABCDEFGH")
-        with patch("pyotp.utils.unicodedata.normalize") as normalize:
-            self.assertFalse(hotp.verify(oversized, 6))
-            for otp_type in (pyotp.TOTP, pyotp.contrib.Steam):
-                totp = otp_type("ABCDEFGHABCDEFGH")
-                for valid_window in (0, 1):
-                    with self.subTest(otp_type=otp_type, valid_window=valid_window):
-                        self.assertFalse(totp.verify(oversized, for_time=200, valid_window=valid_window))
-                        with self.assertRaises(pyotp.OTPVerificationError):
-                            totp.verify_and_get_timecode(oversized, for_time=200, valid_window=valid_window)
-            normalize.assert_not_called()
+        self.assertFalse(hotp.verify(oversized, 6))
+        for otp_type in (pyotp.TOTP, pyotp.contrib.Steam):
+            totp = otp_type("ABCDEFGHABCDEFGH")
+            for valid_window in (0, 1):
+                with self.subTest(otp_type=otp_type, valid_window=valid_window):
+                    self.assertFalse(totp.verify(oversized, for_time=200, valid_window=valid_window))
+                    with self.assertRaises(pyotp.OTPVerificationError):
+                        totp.verify_and_get_timecode(oversized, for_time=200, valid_window=valid_window)
 
-    def test_fullwidth_otp(self):
+    def test_fullwidth_otp_rejected(self):
         fullwidth = str.maketrans(
             "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",
             "０１２３４５６７８９ＡＢＣＤＥＦＧＨＩＪＫＬＭＮＯＰＱＲＳＴＵＶＷＸＹＺ",
@@ -620,16 +617,18 @@ class OTPInputSizeTest(unittest.TestCase):
         for digits in (6, 8, 10):
             with self.subTest(digits=digits):
                 hotp = pyotp.HOTP("ABCDEFGHABCDEFGH", digits=digits)
-                self.assertTrue(hotp.verify(hotp.at(6).translate(fullwidth), 6))
+                self.assertFalse(hotp.verify(hotp.at(6).translate(fullwidth), 6))
                 totp = pyotp.TOTP("ABCDEFGHABCDEFGH", digits=digits)
                 code = totp.at(200).translate(fullwidth)
-                self.assertTrue(totp.verify(code, for_time=200))
-                self.assertEqual(totp.verify_and_get_timecode(code, for_time=200), 6)
+                self.assertFalse(totp.verify(code, for_time=200))
+                with self.assertRaises(pyotp.OTPVerificationError):
+                    totp.verify_and_get_timecode(code, for_time=200)
 
         steam = pyotp.contrib.Steam("ABCDEFGHABCDEFGH")
         code = steam.at(200).translate(fullwidth)
-        self.assertTrue(steam.verify(code, for_time=200))
-        self.assertEqual(steam.verify_and_get_timecode(code, for_time=200), 6)
+        self.assertFalse(steam.verify(code, for_time=200))
+        with self.assertRaises(pyotp.OTPVerificationError):
+            steam.verify_and_get_timecode(code, for_time=200)
 
 
 class CounterOffsetTest(unittest.TestCase):
@@ -683,6 +682,46 @@ class GetTimeCodeTest(unittest.TestCase):
         totp = pyotp.TOTP("ABCDEFGHABCDEFGH")
         with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
             totp.verify_and_get_timecode("764328", for_time=200, valid_window=-1)
+        with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
+            totp.verify("764328", for_time=200, valid_window=-1)
+
+
+class SecretNormalizationTest(unittest.TestCase):
+    def test_spaces_and_hyphens_are_stripped(self):
+        for secret in (
+            "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "GEZD GNBV GY3T QOJQ GEZD GNBV GY3T QOJQ",
+            "GEZD-GNBV-GY3T-QOJQ-GEZD-GNBV-GY3T-QOJQ",
+            "GEZD GNBV-GY3T QOJQ GEZD GNBV-GY3T QOJQ",
+        ):
+            with self.subTest(secret=secret):
+                hotp = pyotp.HOTP(secret)
+                self.assertEqual(hotp.secret, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+                self.assertEqual(hotp.at(0), "755224")
+                self.assertEqual(hotp.at(9), "520489")
+
+    def test_normalized_secret_in_provisioning_uri(self):
+        hotp = pyotp.HOTP("GEZD GNBV-GY3T QOJQ GEZD GNBV-GY3T QOJQ", name="mark@percival")
+        url = urlparse(hotp.provisioning_uri())
+        self.assertEqual(dict(parse_qsl(url.query))["secret"], "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        roundtrip = pyotp.parse_uri(hotp.provisioning_uri())
+        self.assertEqual(roundtrip.at(0), "755224")
+
+    def test_parse_uri_normalizes_secret(self):
+        totp = pyotp.parse_uri("otpauth://totp/?secret=GEZD%20GNBV-GY3T%20QOJQ%20GEZD%20GNBV-GY3T%20QOJQ")
+        self.assertEqual(totp.secret, "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        self.assertEqual(totp.at(30), "287082")
+
+    def test_invalid_secret_characters(self):
+        for secret in ("GEZD!GNBVGY3TQOJQGEZDGNBVGY3TQOJQ", "GEZDGNBV_GY3TQOJQGEZDGNBVGY3TQ", "0189018901890189"):
+            with self.subTest(secret=secret):
+                for otp_type in (pyotp.OTP, pyotp.HOTP, pyotp.TOTP):
+                    otp = otp_type(secret)
+                    with self.assertRaisesRegex(ValueError, "base32") as error:
+                        otp.byte_secret()
+                    self.assertIs(type(error.exception), ValueError)
+                    with self.assertRaisesRegex(ValueError, "base32"):
+                        otp.generate_otp(0)
 
 
 class DigestFunctionTest(unittest.TestCase):

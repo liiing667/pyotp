@@ -1,9 +1,22 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 from typing import Any
+
+_BASE32_SECRET_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567abcdefghijklmnopqrstuvwxyz=")
+
+
+def normalize_secret(secret: str | bytes) -> str:
+    """
+    Normalizes a base32 secret by removing spaces and hyphens, which are
+    commonly used to group characters when secrets are displayed or copied.
+    """
+    if isinstance(secret, bytes):
+        secret = secret.decode("ascii")
+    return secret.replace(" ", "").replace("-", "")
 
 
 class OTP:
@@ -26,7 +39,7 @@ class OTP:
         self.digest = digest
         if digest in [hashlib.md5, hashlib.shake_128]:
             raise ValueError("selected digest function must generate digest size greater than or equals to 18 bytes")
-        self.secret = s
+        self.secret = normalize_secret(s)
         self.name = name or "Secret"
         self.issuer = issuer
 
@@ -52,11 +65,16 @@ class OTP:
         return str_code[-self.digits :]
 
     def byte_secret(self) -> bytes:
-        secret = self.secret
+        secret = normalize_secret(self.secret)
+        if any(char not in _BASE32_SECRET_CHARS for char in secret):
+            raise ValueError("secret contains characters that are not valid base32")
         missing_padding = len(secret) % 8
         if missing_padding != 0:
             secret += "=" * (8 - missing_padding)
-        decoded = base64.b32decode(secret, casefold=True)
+        try:
+            decoded = base64.b32decode(secret, casefold=True)
+        except binascii.Error as error:
+            raise ValueError("secret is not valid base32") from error
         if len(decoded) < 10:
             raise ValueError("Secrets must be at least 80 bits after decoding")
         return decoded
