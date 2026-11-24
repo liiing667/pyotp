@@ -78,11 +78,13 @@ class HOTP(OTP):
             organization title of the OTP entry in Authenticator
         :returns: provisioning URI
         """
+        resolved_name, resolved_issuer = self._provisioning_identity(name=name, issuer_name=issuer_name)
+
         return utils.build_uri(
             self.secret,
-            name=name if name else self.name,
+            name=resolved_name,
             initial_count=initial_count if initial_count is not None else self.initial_count,
-            issuer=issuer_name if issuer_name else self.issuer,
+            issuer=resolved_issuer,
             algorithm=self.digest().name,
             digits=self.digits,
             **kwargs,

@@ -160,10 +160,12 @@ class TOTP(OTP):
             https://github.com/google/google-authenticator/wiki/Key-Uri-Format
 
         """
+        resolved_name, resolved_issuer = self._provisioning_identity(name=name, issuer_name=issuer_name)
+
         return utils.build_uri(
             self.secret,
-            name if name else self.name,
-            issuer=issuer_name if issuer_name else self.issuer,
+            resolved_name,
+            issuer=resolved_issuer,
             algorithm=self.digest().name,
             digits=self.digits,
             period=self.interval,

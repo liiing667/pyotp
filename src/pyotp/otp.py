@@ -34,8 +34,36 @@ class OTP:
         self.secret = s
         self.name = name or "Secret"
         self.issuer = issuer
+        self._name_explicit = bool(name)
         # Validate the Base32 encoding and decoded key length before use.
         self.byte_secret()
+
+    def _provisioning_identity(
+        self,
+        *,
+        name: str | None = None,
+        issuer_name: str | None = None,
+    ) -> tuple[str, str | None]:
+        """
+        Resolve and validate the subject used in a provisioning URI.
+
+        Explicit provisioning arguments may name a previously anonymous
+        credential. They must not silently bind an already named object to a
+        different account or issuer.
+        """
+        resolved_name = name or self.name
+        resolved_issuer = issuer_name if issuer_name else self.issuer
+
+        if issuer_name and self.issuer is not None and issuer_name != self.issuer:
+            raise ValueError(
+                "If issuer is specified by both the OTP object and provisioning parameters, it should be equal."
+            )
+        if name and self._name_explicit and name != self.name:
+            raise ValueError(
+                "The provisioning URI name conflicts with the OTP object's name; the two identities must be equal."
+            )
+
+        return resolved_name, resolved_issuer
 
     def generate_otp(self, input: int) -> str:
         """

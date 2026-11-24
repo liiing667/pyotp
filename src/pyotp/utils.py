@@ -2,9 +2,36 @@ from __future__ import annotations
 
 import unicodedata
 from hmac import compare_digest
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse
 
 _MAX_COMPARISON_LENGTH = 1024
+
+
+def _verify_built_subject(uri: str, *, expected_name: str, expected_issuer: str | None) -> None:
+    """Ensure a generated URI decodes to exactly the requested subject."""
+    parsed_uri = urlparse(uri)
+    label_parts = parsed_uri.path[1:].split(":", 1)
+
+    if expected_issuer is None:
+        if len(label_parts) != 1:
+            raise ValueError("Provisioning URI label conflicts with the requested issuer")
+        actual_issuer = None
+        actual_name = unquote(label_parts[0])
+    else:
+        if len(label_parts) != 2:
+            raise ValueError("Provisioning URI is missing the requested issuer label")
+        actual_issuer = unquote(label_parts[0])
+        actual_name = unquote(label_parts[1])
+
+    if actual_name != expected_name or actual_issuer != expected_issuer:
+        raise ValueError("Provisioning URI subject conflicts with the requested identity")
+
+    query_issuers = [value for key, value in parse_qsl(parsed_uri.query, keep_blank_values=True) if key == "issuer"]
+    if expected_issuer is None:
+        if query_issuers:
+            raise ValueError("Provisioning URI contains an unexpected issuer parameter")
+    elif query_issuers != [expected_issuer]:
+        raise ValueError("Provisioning URI issuer parameter conflicts with the requested identity")
 
 
 def build_uri(
@@ -52,6 +79,16 @@ def build_uri(
     otp_type = "hotp" if is_initial_count_present else "totp"
     base_uri = "otpauth://{0}/{1}?{2}"
 
+    # Validate caller-supplied extension parameters before constructing the
+    # URI. A failure must never produce a publishable partial provisioning URI.
+    for k, v in kwargs.items():
+        if not isinstance(v, str):
+            raise TypeError("All otpauth uri parameters must be strings")
+        if k == "image":
+            image_uri = urlparse(v)
+            if image_uri.scheme != "https" or not image_uri.netloc or not image_uri.path:
+                raise ValueError(f"{image_uri} is not a valid url")
+
     url_args: dict[str, None | int | str] = {"secret": secret}
 
     label = quote(name)
@@ -68,15 +105,10 @@ def build_uri(
     if is_period_set:
         url_args["period"] = period
     for k, v in kwargs.items():
-        if not isinstance(v, str):
-            raise TypeError("All otpauth uri parameters must be strings")
-        if k == "image":
-            image_uri = urlparse(v)
-            if image_uri.scheme != "https" or not image_uri.netloc or not image_uri.path:
-                raise ValueError(f"{image_uri} is not a valid url")
         url_args[k] = v
 
     uri = base_uri.format(otp_type, label, urlencode(url_args).replace("+", "%20"))
+    _verify_built_subject(uri, expected_name=name, expected_issuer=issuer)
     return uri
 
 
