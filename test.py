@@ -803,6 +803,8 @@ class GetTimeCodeTest(unittest.TestCase):
     def test_negative_window(self):
         totp = pyotp.TOTP("ABCDEFGHABCDEFGHABCDEFGH")
         with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
+            totp.verify("823229", for_time=200, valid_window=-1)
+        with self.assertRaisesRegex(ValueError, "valid_window cannot be negative"):
             totp.verify_and_get_timecode("823229", for_time=200, valid_window=-1)
 
 
