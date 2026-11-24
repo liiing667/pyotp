@@ -1,3 +1,10 @@
+Unreleased
+==========
+
+- Add bounded ``look_ahead_window`` support and
+  ``HOTP.verify_and_advance()``, which returns the next counter to
+  persist so HOTP OTPs cannot be replayed or verified out of order
+
 Changes for v2.12.1 (2026-11-18)
 ================================
 

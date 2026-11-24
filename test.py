@@ -189,6 +189,82 @@ class HOTPExampleValuesFromTheRFC(unittest.TestCase):
         self.assertFalse(hotp.verify("520489", 10))
         self.assertFalse(hotp.verify("５２０４８９", 10))
 
+    def test_verify_and_advance_returns_next_counter(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        next_counter = hotp.verify_and_advance("520489", 9)
+        self.assertEqual(next_counter, 10)
+        self.assertEqual(hotp.verify_and_advance("５２０４８９", 9), 10)
+        next_counter = hotp.verify_and_advance(hotp.at(next_counter), next_counter)
+        self.assertEqual(next_counter, 11)
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_advance("520489", 10)
+
+    def test_verify_and_advance_supports_initial_count(self):
+        hotp_zero = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", initial_count=0)
+        self.assertEqual(hotp_zero.verify_and_advance(hotp_zero.at(0), 0), 1)
+
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ", initial_count=12)
+        self.assertEqual(hotp.at(0), hotp.generate_otp(12))
+        next_counter = hotp.verify_and_advance(hotp.at(0), 0)
+        self.assertEqual(next_counter, 1)
+        self.assertEqual(hotp.verify_and_advance(hotp.at(1), next_counter), 2)
+
+    def test_look_ahead_window_is_bounded(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        self.assertFalse(hotp.verify(hotp.at(2), 0, look_ahead_window=1))
+        self.assertTrue(hotp.verify(hotp.at(2), 0, look_ahead_window=2))
+        self.assertEqual(hotp.verify_and_advance(hotp.at(2), 0, look_ahead_window=2), 3)
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_advance(hotp.at(2), 0, look_ahead_window=1)
+
+    def test_verify_and_advance_skips_consumed_counters(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        next_counter = hotp.verify_and_advance(hotp.at(2), 0, look_ahead_window=2)
+        self.assertEqual(next_counter, 3)
+        for counter in range(3):
+            with self.subTest(counter=counter):
+                self.assertFalse(hotp.verify(hotp.at(counter), next_counter))
+
+    def test_mismatch_leaves_counter_untouched(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        with self.assertRaises(pyotp.OTPVerificationError):
+            hotp.verify_and_advance("000000", 0, look_ahead_window=1)
+        self.assertEqual(hotp.verify_and_advance(hotp.at(0), 0), 1)
+
+    def test_verify_normalizes_fullwidth_otp(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        fullwidth = hotp.at(0).translate(str.maketrans("0123456789", "０１２３４５６７８９"))
+        self.assertTrue(hotp.verify(fullwidth, 0))
+        self.assertEqual(hotp.verify_and_advance(fullwidth, 0), 1)
+
+    def test_failed_save_does_not_advance_persisted_counter(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        saved_counters = []
+
+        def save(counter, fail_once):
+            if fail_once:
+                raise RuntimeError("storage unavailable")
+            saved_counters.append(counter)
+
+        next_counter = hotp.verify_and_advance(hotp.at(0), 0)
+        with self.assertRaisesRegex(RuntimeError, "storage unavailable"):
+            save(next_counter, fail_once=True)
+        self.assertEqual(saved_counters, [])
+
+        # Retrying with the unchanged persisted counter accepts the same OTP and returns the same next counter.
+        self.assertEqual(hotp.verify_and_advance(hotp.at(0), 0), next_counter)
+        save(next_counter, fail_once=False)
+        self.assertEqual(saved_counters, [1])
+
+    def test_invalid_verify_counter_and_window(self):
+        hotp = pyotp.HOTP("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+        for method in (hotp.verify, hotp.verify_and_advance):
+            with self.subTest(method=method.__name__):
+                with self.assertRaisesRegex(ValueError, "counter cannot be negative"):
+                    method("123456", -1)
+                with self.assertRaisesRegex(ValueError, "look_ahead_window cannot be negative"):
+                    method("123456", 0, look_ahead_window=-1)
+
     def test_provisioning_uri(self):
         hotp = pyotp.HOTP("wrn3pqx5uqxqvnqrwrn3pqx5uqxqvnqr", name="mark@percival")
 

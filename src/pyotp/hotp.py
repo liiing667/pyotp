@@ -4,6 +4,7 @@ import hashlib
 from typing import Any
 
 from . import utils
+from .exceptions import OTPVerificationError
 from .otp import OTP
 
 
@@ -47,14 +48,60 @@ class HOTP(OTP):
         """
         return self.generate_otp(self.initial_count + count)
 
-    def verify(self, otp: str, counter: int) -> bool:
+    def verify(self, otp: str, counter: int, *, look_ahead_window: int = 0) -> bool:
         """
-        Verifies the OTP passed in against the current counter OTP.
+        Verifies the OTP against the given counter and its bounded look-ahead window.
+
+        This method is stateless: it does not advance any counter and can accept the same OTP more
+        than once. Use :meth:`verify_and_advance` to obtain the next counter that must be persisted
+        for replay protection.
 
         :param otp: the OTP to check against
-        :param counter: the OTP HMAC counter
+        :param counter: the current OTP counter relative to ``initial_count``
+        :param look_ahead_window: number of counters after ``counter`` that are also accepted
+        :returns: True if verification succeeded, False otherwise
+        :raises ValueError: if ``counter`` or ``look_ahead_window`` is invalid
         """
-        return utils.strings_equal(str(otp), str(self.at(counter)))
+        try:
+            self.verify_and_advance(otp, counter, look_ahead_window=look_ahead_window)
+        except OTPVerificationError:
+            return False
+        return True
+
+    def verify_and_advance(self, otp: str, counter: int, *, look_ahead_window: int = 0) -> int:
+        """
+        Verifies the OTP and returns the next counter to persist.
+
+        .. caution::
+
+            Note the signature difference between this method and :meth:`verify`:
+            this method raises :class:`~pyotp.exceptions.OTPVerificationError`
+            on an OTP mismatch, while :meth:`verify` returns ``False``.
+
+        On a successful match at counter ``C`` (with
+        ``counter <= C <= counter + look_ahead_window``), this method returns
+        ``C + 1``. Persist the returned value and supply it as ``counter`` on
+        the next verification; reused or out-of-order counters can then never
+        pass again. If persisting the returned value fails, do not replace the
+        previously stored counter, so it remains unchanged for a retry.
+
+        :param otp: the OTP to check against
+        :param counter: the current OTP counter relative to ``initial_count``
+        :param look_ahead_window: number of counters after ``counter`` that are also accepted
+        :returns: the next counter value to persist (the matching relative counter plus one)
+        :raises pyotp.exceptions.OTPVerificationError: if the OTP does not match a permitted counter
+        :raises ValueError: if ``counter`` or ``look_ahead_window`` is invalid
+        """
+        if counter < 0:
+            raise ValueError("counter cannot be negative")
+        if look_ahead_window < 0:
+            raise ValueError("look_ahead_window cannot be negative")
+
+        for candidate in range(counter, counter + look_ahead_window + 1):
+            if utils.strings_equal(str(otp), str(self.at(candidate))):
+                return candidate + 1
+
+        raise OTPVerificationError("OTP verification failed")
 
     def provisioning_uri(
         self,

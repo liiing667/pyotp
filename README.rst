@@ -19,7 +19,8 @@ minimum, application implementers should follow this checklist:
 - Ensure transport confidentiality by using HTTPS
 - Ensure HOTP/TOTP secret confidentiality by storing secrets in a controlled access database
 - Deny replay attacks by persisting the last accepted OTP counter for each credential and rejecting reused counters.
-  For TOTP, use ``verify_and_get_timecode()`` as described in `Preventing replay attacks`_ below.
+  For TOTP, use ``verify_and_get_timecode()``; for HOTP, use ``verify_and_advance()`` as described in
+  `Preventing replay attacks`_ below.
 - Throttle (rate limit) brute-force attacks against your application's login functionality (see RFC 4226, section 7.3
   and NIST SP 800-63B, section 3.2.2)
 - When implementing a "greenfield" application, consider supporting
@@ -112,6 +113,43 @@ row per credential, an ``id`` primary key, and a nullable integer ``last_timecod
 Grant authentication only when this function returns ``True``, after the database transaction has committed.
 If you enable ``valid_window``, persist the returned matching timecode, which may differ from the server's current timecode.
 
+For HOTP, ``HOTP.verify()`` remains stateless. Use ``HOTP.verify_and_advance()`` for replay-safe verification: it
+searches only from the persisted counter through the bounded ``look_ahead_window`` and returns the next counter to
+persist. If the OTP matches counter ``C``, the method returns ``C + 1``. Counters behind the persisted counter are
+never accepted, so replay and out-of-order verification fail.
+
+The read-modify-write must run in one database transaction (for example with row locking) so two concurrent requests
+cannot advance the same credential twice. For example, use a ``hotp_credentials`` table with an ``id`` primary key and
+an integer ``counter`` column initialized to ``0`` (or another legal initial counter).
+
+.. code:: python
+
+    def verify_hotp_once(db, credential_id, hotp, otp, look_ahead_window=0):
+        with db:
+            current_counter = db.execute(
+                "SELECT counter FROM hotp_credentials WHERE id = ?", (credential_id,)
+            ).fetchone()[0]
+            try:
+                next_counter = hotp.verify_and_advance(
+                    otp, current_counter, look_ahead_window=look_ahead_window
+                )
+            except pyotp.OTPVerificationError:
+                return False
+
+            db.execute(
+                "UPDATE hotp_credentials SET counter = ? WHERE id = ?",
+                (next_counter, credential_id),
+            )
+        return True
+
+Grant authentication only after the transaction has committed. If the update or commit fails, leave the stored
+counter unchanged and do not grant authentication; the OTP can then be retried because PyOTP did not mutate any
+application state.
+
+The ``counter`` argument and returned next counter are relative to the credential's ``initial_count``. For example,
+with ``initial_count=12``, matching the first generated OTP (``hotp.at(0)``) returns ``1``; use that value on the next
+call while the provisioning URI still records the absolute starting HMAC counter ``12``.
+
 .. warning::
 
     For both HOTP and TOTP, do not use the raw submitted OTP, or a hash of that raw value, as the replay-detection key.
@@ -133,6 +171,9 @@ Counter-based OTPs
     # OTP verified with a counter
     hotp.verify('666948', 1401) # => True
     hotp.verify('666948', 1402) # => False
+
+    # Verify within a bounded look-ahead window and get the next counter to persist.
+    hotp.verify_and_advance(hotp.at(1401), 1400, look_ahead_window=1) # => 1402
 
 Generating a Secret Key
 ~~~~~~~~~~~~~~~~~~~~~~~
